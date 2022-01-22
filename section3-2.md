@@ -125,3 +125,60 @@ SDK 自带了 PIO 汇编器，名为 `pioasm`。该程序接受一个 PIO 汇编
 
 #### 3.2.3.1. 输出移位寄存器（OSR）
 
+| ![图40](figures/figure-40.png) |
+|:--:|
+| 图40. 输出移位寄存器（OSR）。数据每次可以并行输出 1 ~ 32 比特，未使用的数据由一个双方向移位器负责回收。当 OSR 寄存器为空时，它会从 TX FIFO 中加载数据。
+
+输出移位寄存器（OSR）负责存储并在 TX FIFO 和管脚（或其他目的地，如可擦写寄存器）之间移位输出数据。
+
+
+- `PULL` 指令：从 TX FIFO 中移除一个 32 位字并置于 OSR 中。
+- `OUT` 指令将 OSR 中的数据移位至其他目的地，一次可移位 1 ~ 32 比特。
+- 当数据被移位出后，OSR 会填充为零。
+- 如果启用自动加载（autopull），那么在达到某个移位阈值时，状态机会在执行 `OUT` 指令时，自动从 FIFO 加载数据到 OSR。
+- 移位方向可以是左或右，由处理器通过配置寄存器进行设置。
+
+例如，以每两个时钟周期一个字节的速率，将数据通过 FIFO 传输到管脚：
+
+```
+1 .program pull_example1
+2 loop:
+3     out pins, 8
+4 public entry_point:
+5     pull
+6     out pins, 8 [1]
+7     out pins, 8 [1]
+8     out pins, 8
+9     jmp loop
+
+```
+
+在绝大部分情况下，可以通过自动加载（autopull，参见[3.5.4节](section3-5#354-TODO)）功能，当状态机试图在空的 OSR 上执行 `OUT` 指令时，由硬件自动填充 OSR。这样做有两个好处：
+
+- 节省一条从 FIFO 加载数据的指令
+- 实现更高的吞吐量，只要 FIFO 有数据，就能以每时钟周期最高 32 比特的数据输出
+
+配置好自动加载后，上述程序可以简化如下，其行为完全相同：
+
+```
+1 .program pull_example2
+2 
+3 loop:
+4     out pins, 8
+5 public entry_point:
+6     jmp loop
+```
+
+通过程序折返功能（program wrapping，参见[3.5.2节](section3-5#352-TODO)）还可以进一步简化程序，实现每个系统时钟周期输出 1 字节。
+
+```
+1 .program pull_example3
+2 
+3 public entry_point:
+4 .wrap_target
+5     out pins, 8 [1]
+6 .wrap
+```
+
+#### 3.2.3.2 输入移位寄存器（ISR）
+
