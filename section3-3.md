@@ -12,7 +12,7 @@ PIO 汇编器能够解析一段 PIO 源文件，并输出汇编后的代码，�
 
 PIO 程序中的汇编语言可以使用以下伪指令：
 
-*.define ( PUBLIC ) <symbol> <value>*
+`.define ( PUBLIC ) <symbol> <value>`
 
 定义一个名为 `<symbol>` 的整数符号，其值为 `<value>` （参见[3.3.2节](section3-3#TODO)）。
 如果 `.define` 出现在输入文件中的第一个程序之前，那么定义就是全局的，对所有程序生效；否则，
@@ -66,4 +66,56 @@ PIO 程序中的汇编语言可以使用以下伪指令：
 | `integer` | 一个整数值，如 `3` 或 `-7` |
 | `hex`     | 一个十六进制值，如 `0xf` |
 | `binary`  | 一个二进制值，如 `0b1001` |
-| `symbol`  | 由
+| `symbol`  | 由 `.define` 定义的一个值（参见[3.3.1节](#331-伪指令)） |
+| `<label>` | 程序中的标签所对应的指令偏移量。通常在 JMP 指令中使用（参见[3.4.2节](#TODO) |
+| `( <expression> )` | 一个可求值的表达式；参见[3.3.3节](#333-表达式)。注意括号是必须的。 |
+
+
+### 3.3.3. 表达式
+
+表达式可以与 pioasm 值一同使用。
+
+| `<expression> + <expression>` | 两个表达式的和 |
+| `<expression> - <expression>` | 两个表达式的差 |
+| `<expression> * <expression>` | 两个表达式的积 |
+| `<expression> / <expression>` | 两个表达式的整数除法商 |
+| `- <expression>` | 表达式的负值 |
+| `:: <expression>` | 表达式的按位取反 |
+| `<value>` | 任意的值（参见[3.3.2节](#332-值) |
+
+
+
+### 3.3.4. 注释
+
+行注释以 `//` 或 `;` 开头。
+
+C 语言风格的注释放在 `/*` 和 `*/` 之间。
+
+
+### 3.3.5. 标签
+
+标签的形式如下：
+
+`<symbol>:`
+
+或
+
+`PUBLIC <symbol>:`
+
+标签必须从行首开始。
+
+**提示**：标签实际上只是自动的 `.define`，其值设置为当前程序指令的偏移量。`PUBLIC` 的标签可以通过与 `PUBLIC` 的 `.define` 同样的方式从用户代码访问。
+
+
+
+### 3.3.6. 指令
+
+所有的 pioasm 指令都遵循以下格式：
+
+`<instruction> (side <side_set_value>) ([<delay_value])`
+
+其中：
+
+`<instruction>` 是下一节介绍的汇编指令。（参见[3.4节](section3-4)）
+
+`<side_set_valie>` 是
