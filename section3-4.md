@@ -153,7 +153,7 @@ PIO 指令为 16 位，编码方式如下：
 
 `<source>` 是上述源之一。
 
-`<bit_count>` 是一个值（参见[3.3.2节](section3-3#332_值)，指定了要移位的比特数（有效值为 1 ~ 32）。
+`<bit_count>` 是一个值（参见[3.3.2节](section3-3.md#332_值)，指定了要移位的比特数（有效值为 1 ~ 32）。
 
 
 ### 3.4.5. OUT
@@ -164,7 +164,62 @@ PIO 指令为 16 位，编码方式如下：
 
 #### 3.4.5.2. 操作
 
+将 `Bit count` 个比特移出输入移位寄存器（OSR），并写入 `Destination`。此外，还会增加输出移位计数器 `Bit count`，直到最大值 32。
+
+- Destination：
+  - 000：`PINS`
+  - 001：`X`（可擦写寄存器 X）
+  - 010：`Y`（可擦写寄存器 Y）
+  - 011：`NULL`（全零）
+  - 100：`PINDIRS`
+  - 101：`PC`
+  - 110：`ISR`（同时设置 ISR 移位计数器为 `Bit count`）
+  - 111：`EXEC`（将 OSR 的移位数据作为指令执行）
+- Bit count：要从 OSR 移出多少比特。值为 1..32 比特，32 编码为 `00000`。
+
+
+将一个 32 位值写入 `Destination`：低 `Bit count` 个比特来自 OSR，其余为零。如果 `SHIFTCTRL_OUT_SHIFTDIR` 为右，则该值为 OSR 的最低 `Bit count` 比特，否则为最高 `Bit count` 比特。
+
+`PINS` 和 `PINDIRS` 使用 `OUT` 的管脚映射，参见[3.5.6节](section3-5.md#356_TODO)。
+
+如果启用自动加载（autopull），那么如果达到了加载阈值 `SHIFTCTRL_PULL_THRESH`，则自动从 TX FIFO 填充 OSR。同时输出移位计数器清零。在这种情况下，如果 TX FIFO 为空，则 `OUT` 会进入等待状态，
+但执行时间仍然为一个时钟周期。详情参考[3.5.4节](section3-5.md#354-TODO)。
+
+
+有了 `OUT EXEC`，指令就可以放在 FIFO 数据流中。`OUT` 本身的执行需要一个时钟周期，然后下一个周期执行来自 OSR 的指令。该机制能执行的指令类型没有限制。最初的 `OUT` 指令的延时周期将被忽略，
+但之后执行的指令可以正常插入延时周期。
+
+`OUT PC` 相当于无条件跳转到 OSR 移出的值对应的地址。
+
+
+
+#### 3.4.5.3. 汇编语法
+
+
+`out <destination>, <bit_count>`
+
+其中：
+
+`<destination>` 是上述目的地之一。
+
+`<bit_count>` 是一个值（参见[3.3.2节](section3-3.md#332-值)，指定要移位的比特数（有效值为 1 ~ 32）。
 
 
 
 
+### 3.4.6. PUSH
+
+#### 3.4.6.1. 编码
+
+![PUSH](figures/instruction-push.png)
+
+
+#### 3.4.6.2. 操作
+
+
+将 ISR 的内容作为一个 32 位字推出到 RX FIFO。同时将 ISR 清除为全零。
+
+- `IfFull`：如果设置为 1，那么在输入移位计数器未达到阈值（`SHIFTCTRL_PUSH_THRESH`，与自动推出用的是同一个选项；参见[3.5.4节](section3-5.md#354-TODO)），则什么都不做。
+- `Block`：如果设置为 1，那么在 RX FIFO 为满时，暂停执行。
+
+`PUSH IFFULL` 
