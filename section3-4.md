@@ -100,7 +100,7 @@ PIO 指令为 16 位，编码方式如下：
 
 `wait <polarity> pin <pin_num>`
 
-`wait <polarity> irq <irq_num> ( rel )`
+`wait <polarity> irq <irq_num> (rel)`
 
 其中：
 
@@ -110,7 +110,7 @@ PIO 指令为 16 位，编码方式如下：
 
 `<gpio_num>` 是一个值（参见[3.3.2节](section3-3.md#332-值)），指定实际的 GPIO 管脚编号
 
-`<irq_num> ( rel )` 是一个值（参见[3.3.2节](section3-3.md#332-值)），指定要等待的 IRQ 编号（0 ~ 7）。如果设置了 `rel`，则实际的 IRQ 编号的计算方式为，将 IRQ 编号的最低两个比特（`irq_num`<sub>10</sub>）替换成和的最低两个比特（`irq_num`<sub>10</sub> + `sm_num`<sub>10</sub>），其中 `sm_num`<sub>10</sub> 为状态机编号
+`<irq_num> (rel)` 是一个值（参见[3.3.2节](section3-3.md#332-值)），指定要等待的 IRQ 编号（0 ~ 7）。如果设置了 `rel`，则实际的 IRQ 编号的计算方式为，将 IRQ 编号的最低两个比特（`irq_num`<sub>10</sub>）替换成和的最低两个比特（`irq_num`<sub>10</sub> + `sm_num`<sub>10</sub>），其中 `sm_num`<sub>10</sub> 为状态机编号
 
 
 ### 3.4.4. IN
@@ -222,4 +222,105 @@ PIO 指令为 16 位，编码方式如下：
 - `IfFull`：如果设置为 1，那么在输入移位计数器未达到阈值（`SHIFTCTRL_PUSH_THRESH`，与自动推出用的是同一个选项；参见[3.5.4节](section3-5.md#354-TODO)），则什么都不做。
 - `Block`：如果设置为 1，那么在 RX FIFO 为满时，暂停执行。
 
-`PUSH IFFULL` 
+`PUSH IFFULL` 也能像自动推出（autopush）那样让程序更紧凑。如果启用了自动推出，会导致 `IN` 在不恰当的时候陷入等待状态，比如状态机需要在此时判断某种外部控制信号，那么 `PUSH IFFULL` 就能派上用场了。
+
+PIO 汇编器会默认设置 `Block` 位。如果 `Block` 位没有设置，则 `PUSH` 不会在 RX FIFO 满的情况下进入等待，而是会继续立即执行下一条指令。此时，FIFO 的状态和内容不变。ISR 仍被清空为全零，
+同时设置 `FDEBUG_RXSTALL` 标志（与 RX FIFO 满时进行阻塞 `PUSH` 或自动推出相同），表示数据已经丢失。
+
+
+#### 3.4.6.3. 汇编语法
+
+`push (iffull)`
+
+`push (iffull) block`
+
+`push (iffull) nonblock`
+
+其中：
+
+`iffull` 相当于上述 `IfFull == 1`。也就是说，不指定的情况下，默认值为 `IfFull == 0`
+
+`block` 相当于上述 `Block == 1`。如果不指定 `block` 或 `noblock`，则此值为默认值
+
+`noblock` 相当于上述 `Block == 0`。
+
+
+### 3.4.7. PULL
+
+#### 3.4.7.1. 编码
+
+![PULL](figures/instruction-pull.png)
+
+
+#### 3.4.7.2. 操作
+
+从 TX FIFO 加载一个 32 位字到 OSR 中。
+
+- `IfEmpty`：如果为 1，那么在输出移位计数器达到阈值（`SHIFTCTRL_PULL_THRESH`，与自动加载用的是同一个选项；参见[3.5.4节](section3-5.md#354-TODO)），则什么都不做。
+- `Block`：如果设置为 1，那么在 TX FIFO 为空时，暂停执行。如果为 0，那么从空的 FIFO 中加载，将会把可擦写寄存器 X 的内容复制到 OSR。
+
+一些外设（UART、SPI等）应当在无数据时等待，有数据时进行加载；而另一些（I2S）则应当继续执行，而且最好是继续输出占位数据，或重复数据。这个行为可以通过 `Block` 参数实现。
+
+在空的 FIFO 上执行不阻塞的 `PULL` 相当于执行 `MOV OSR, X`。程序可以事先在寄存器 X 中加载适当的默认值，或在每次 `PULL NOBLOCK` 之后执行一次 `MOV X, OSR`，从而重复上一个有效的 FIFO 字，直到新的数据出现。
+
+如果在启用自动加载时，当 TX FIFO 为空时的 `OUT` 会导致程序在不恰当的地方等待，就能用 `PULL IFEMPTY` 解决问题。`IfEmpty` 可以像自动加载一样简化一些程序，例如可以去掉外层循环计数器，但是它能够控制暂停的发生位置。
+
+**注意** 当启用自动加载时，在 OSR 满的情况下任何 `PULL` 指令都是误操作，所以 `PULL` 指令可以作为一种屏障。`OUT NULL, 32` 可以显式地抛弃 OSR 的内容。更多细节参见[3.5.4.2节](section3-5.md#354-TODO)。
+
+
+#### 3.4.7.3. 汇编语法
+
+`pull (ifempty)`
+
+`pull (ifempty) block`
+
+`pull (ifempty) noblock`
+
+
+其中：
+
+`ifempty` 相当于上述 `IfEmpty == 1`，即如果没有指定，则默认值为 `IfEmpty == 0`
+
+`block` 相当于上述 `Block == 1`。如果不指定 `block` 或 `noblock`，则此值为默认值
+
+`noblock` 相当于上述 `Block == 0`。
+
+
+
+### 3.4.8. MOV
+
+
+#### 3.4.8.1. 编码
+
+![MOV](figures/instruction-mov.png)
+
+
+#### 3.4.8.2. 操作
+
+从 `Source` 复制数据到 `Destination`。
+
+- Destination：
+  - 000：`PINS`（使用与 `OUT` 相同的管脚映射）
+  - 001：`X`（可擦写寄存器 X）
+  - 010：`Y`（可擦写寄存器 Y）
+  - 011：保留
+  - 100：`EXEC`（将数据作为指令执行）
+  - 101：`PC`
+  - 110：`ISR`（该操作会重置输入移位计数器为零，意为空）
+  - 111：`OSR`（该操作会重置输出移位寄存器为零，意为满）
+- Operation：
+  - 00：无
+  - 01：求补（按位求补）
+  - 10：按位取反
+  - 11：保留
+- Source：
+  - 000：`PINS`（使用与 `IN` 相同的管脚映射）
+  - 001：`X`
+  - 010：`Y`
+  - 011：`NULL`
+  - 100：保留
+  - 101：`STATUS`
+  - 110：`ISR`
+  - 111：`OSR`
+
+
