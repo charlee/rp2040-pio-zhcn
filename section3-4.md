@@ -310,8 +310,8 @@ PIO 汇编器会默认设置 `Block` 位。如果 `Block` 位没有设置，则 
   - 111：`OSR`（该操作会重置输出移位寄存器为零，意为满）
 - Operation：
   - 00：无
-  - 01：求补（按位求补）
-  - 10：按位取反
+  - 01：求反（按位求补）
+  - 10：反转比特顺序
   - 11：保留
 - Source：
   - 000：`PINS`（使用与 `IN` 相同的管脚映射）
@@ -322,5 +322,98 @@ PIO 汇编器会默认设置 `Block` 位。如果 `Block` 位没有设置，则 
   - 101：`STATUS`
   - 110：`ISR`
   - 111：`OSR`
+
+`MOV PC` 会导致无条件跳转。`MOV EXEC` 的效果和 `OUT EXEC`（参见[3.4.5节](#345-out)）相同，可以将寄存器的内容作为指令执行。
+`MOV` 指令自身需要一个时钟周期，`Source` 中的指令在下一个周期执行。`MOV EXEC` 上的延时周期会被忽略，但被执行的指令可以带有延时周期。
+
+源 `STATUS` 的值为全 1 或全 0，取决于某些状态机的状态，如 FIFO 满/空等。可以通过 `EXECCTRL_STATUS_SEL` 配置。
+
+`MOV` 可以通过有限的几种方式操作传输的数据，由 `Operation` 参数指定。求反操作会将 `Destination` 中的每个比特设置为 `Source` 中对应比特的 NOT，
+也就是说，1 变成 0，0 变成 1。至于反转比特顺序，如果将比特编号为 0 ~ 31 的话，该操作可以将 `Destination` 中的每个比特 n 设置为 `Source` 中的比特 31 - n。
+
+
+#### 3.4.8.3. 汇编语法
+
+`mov <destination>, (op) <source>`
+
+其中：
+
+`<destination>` 是上述目的地之一。
+
+`<op>` 如果存在的话，为下列值之一：
+
+- `!` 或 `~` 表示 NOT （注意：永远是按位求 NOT）
+- `::` 表示反转比特顺序
+
+`<source>` 是上述源之一。
+
+
+### 3.4.9. IRQ
+
+
+#### 3.4.9.1. 编码
+
+![IRQ](figures/instruction-irq.png)
+
+
+#### 3.4.9.2. 操作
+
+设置或清除由 `Index` 参数指定的 IRQ 标志。
+
+- Clear：如果为 1，则清除 `Index` 指定的标志，否则设置标志。如果指定了 `Clear`，则忽略 `Wait` 比特。
+- Wait：等待指定标志再次变成低，即，等待某个系统中断处理函数响应该标志。
+- Index：
+  - 3 个 LSB 比特指定一个 IRQ 索引，值为 0 ~ 7。根据 Clear 比特的值，该 IRQ 标志将被设置或清除。
+  - 如果设置了 MSB，则将状态机ID（0 ~ 3）用模 4 的方式加到 IRQ 索引上，即结果是最低 2 比特。例如，状态机 2 设置标志值 0x11，将会设置 IRQ 3，而设置标志值 0x13 将会设置标志 1。
+
+IRQ 标志 4 ~ 7 只能被状态机使用，而 IRQ 标志 0 ~ 3 可以作为系统级别的中断，在 PIO 的两个外部中断请求线之一上使用，具体采用哪个外部中断请求线，由 `IRQ0_INTE` 和 `IRQ1_INTE` 配置。
+
+模 4 加法可以实现 IRQ 和 WAIT 指令的“相对寻址”，用于运行同一个程序的不同状态机之间的同步。比特 2 （第三个 LSB)不受此加法影响。
+
+如果设置了 `Wait`，则 `Delay` 周期会等到等待期间结束后再开始。
+
+
+#### 3.4.9.3. 汇编语法
+
+`irq <irq_num> (_rel)`
+
+`irq set <irq_num> (_rel)`
+
+`irq nowait <irq_num> (_rel)`
+
+`irq wait <irq_num> (_rel)`
+
+`irq clear <irq_num> (_rel)`
+
+其中：
+
+`<irq_num> (_rel)` 是一个值（参见[3.3.2节](section3-3.md#332-值)），指定要等待的 IRQ 编号（0 ~ 7）。如果存在 `rel`，则实际的 IRQ 编号的计算方式为，将 IRQ 编号（`irq_num`<sub>10</sub>）的最低两比特替换为
+（`<irq_num`<sub>10</sub> + `sm_num`<sub>10</sub>）的最低两比特，其中 `sm_num`<sub>10</sub> 为状态机编号
+
+`irq` 表示设置 IRQ，无需等待
+
+`irq set` 也表示设置 IRQ，无需等待
+
+`irq nowait` 还是表示设置 IRQ，无需等待
+
+`irq wait` 表示设置 IRQ，然后等待 IRQ 被清除后再继续
+
+`irq clear` 表示清除 IRQ
+
+
+### 3.4.10. SET
+
+#### 3.4.10.1. 编码
+
+![SET](figures/instruction-set.png)
+
+
+#### 3.4.10.2. 操作
+
+将立即值 `Data` 写入到 `Destination`。
+
+- Destination：
+  - 000：`PINS`
+  
 
 
