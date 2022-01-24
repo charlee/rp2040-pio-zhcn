@@ -182,3 +182,214 @@ static inline pio_sm_config squarewave_wrap_program_get_default_config(uint offs
 
 ### 3.5.4. 自动推出和自动加载
 
+随着 `OUT` 指令的执行，数据移出，OSR 会逐渐清空。OSR 为空后必须加载数据，比如通过 `PULL` 指令从 TX FIFO 传输一个字的数据到 OSR。类似地，ISR 为满后也必须清空。
+一种方法是，在移位一定数量的数据之后，通过循环执行一次 `PULL`：
+
+```
+ 1 .program manual_pull
+ 2 .side_set 1 opt
+ 3 
+ 4 .wrap_target
+ 5     set x, 2                     ; X = bit count - 2
+ 6     pull            side 1 [1]   ; Stall here if no TX data
+ 7 bitloop:
+ 8     out pins, 1     side 0 [1]   ; Shift out data bit and toggle clock low
+ 9     jmp x-- bitloop side 1 [1]   ; Loop runs 3 times
+10     out pins, 1     side 0       ; Shift out last bit before reloading X
+11 .wrap
+```
+
+
+该程序按照每 4 个时钟周期 1 比特的速率，从每个 FIFO 字中移出 4 比特，同时输出时钟信号。当 TX FIFO 为空时，程序在时钟高电平处暂停（注意在指令暂停的周期上 side-set 依然会生效）。
+图43演示了状态机执行该程序的过程。
+
+| ![图43](figures/figure-43.png) |
+|:--:|
+| 图43. `manual_pull` 程序的执行过程。X 是循环计数器。每次循环会移出一比特数据，然后将时钟拉低，再拉高。每条指令都有一个周期的延时，因此整个循环需占用四个时钟周期。在第三次循环后，移出第四比特，然后状态机立即返回程序开头，重置循环计数器，并加载新的数据，同时维持每比特 4 个时钟周期的节奏。 |
+
+该程序有一些限制：
+
+- 它占用了 5 个指令槽，但只有 2 个是有用的（`out pins, 1 set 0` 和 `... set 1`），用于输出串行数据和时钟信号。
+- 它的吞吐量的上限为系统时钟频率除以 4，因为它需要额外的周期来加载新数据并重新设置循环计数器。
+
+这是非常常见的一种 PIO 程序，所以没个状态机都有一些额外的硬件来处理这种情况。状态机会跟踪从 OSR `OUT` 出的比特数，以及 `IN` 进 ISR 的比特数，在这些计数器达到某个可配置的阈值后，执行特定的动作。
+
+- 在执行 `OUT` 指令时，如果达到或超过加载的阈值，且 TX FIFO 中有数据的话，状态机就会同时将 TX FIFO 中的数据加载到 OSR 中。
+- 在执行 `IN` 指令时，如果达到或超过推出的阈值，且 RX FIFO 中有数据的话，状态机可以直接将移位结果写入 RX FIFO 中，并清除 ISR。
+
+利用自动加载（autopull）功能，`manual_pull` 示例可以重写如下：
+
+```
+1 .program autopull
+2 .side_set 1
+3 
+4 .wrap_target
+5     out pins, 1    side 0      [1]
+6     nop            side 1      [1]
+7 .wrap
+```
+
+这个程序比原版本更短、更简单，而且如果去掉延时的话，运行速度是原版本的*两倍*，因为通过硬件加载 OSR 是“免费”的。注意程序并不知道下一次加载之前需要移位多少比特；硬件会在达到配置好的阈值（`SHIFTCTRL_PULL_THRESH`）后自动加载，
+所以示例程序也可以从每个 FIFO 字中移出 16 比特或 32 比特。
+
+最后，注意上述程序与原本并非*完全*相同，因为它会在时钟信号低时暂停，而不是高的时候。我们可以通过 `PULL IFEMPTY` 指令改变暂停位置，该指令使用与自动加载（autopull）同样的可配置阈值：
+
+```
+1 .program somewhat_manual_pull
+2 .side_set 1
+3 
+4 .wrap_target
+5     out pins, 1    side 0      [1]
+6     pull ifempty   side 1      [1]
+7 .wrap
+```
+
+下面是完整的示例（PIO 程序，以及一个用于加载它并运行的 C 程序），演示了如何在同一个状态机上同时启用自动加载（autopull）和自动推出（autopush）。
+状态机 0 的功能是将数据从 TX FIFO 传输至 RX FIFO，吞吐量为每两个时钟周期一个字。该程序还演示了当 OSR 和 TX FIFO 均为空时，状态机会在执行 `OUT` 时进入暂停状态。
+
+```
+1 .program auto_push_pull
+2 
+3 .wrap_target
+4     out x, 32
+5     in x, 32
+6 .wrap
+```
+```c
+#include "tb.h" // TODO this is built against existing sw tree, so that we get printf etc
+
+#include "platform.h"
+#include "pio_regs.h"
+#include "system.h"
+#include "hardware.h"
+
+#include "auto_push_pull.pio.h"
+
+int main()
+{
+    tb_init();
+
+    // Load program and configure state machine 0 for autopush/pull with
+    // threshold of 32, and wrapping on program boundary. A threshold of 32 is
+    // encoded by a register value of 00000.
+    for (int i = 0; i < count_of(auto_push_pull_program); ++i)
+        mm_pio->instr_mem[i] = auto_push_pull_program[i];
+    mm_pio->sm[0].shiftctrl =
+            (1u << PIO_SM0_SHIFTCTRL_AUTOPUSH_LSB) |
+            (1u << PIO_SM0_SHIFTCTRL_AUTOPULL_LSB) |
+            (0u << PIO_SM0_SHIFTCTRL_PUSH_THRESH_LSB) |
+            (0u << PIO_SM0_SHIFTCTRL_PULL_THRESH_LSB);
+    mm_pio->sm[0].execctrl =
+            (auto_push_pull_wrap_target << PIO_SM0_EXECCTRL_WRAP_BOTTOM_LSB) |
+            (auto_push_pull_wrap << PIO_SM0_EXECCTRL_WRAP_TOP_LSB);
+
+    // Start state machine 0
+    hw_set_bits(&mm_pio->ctrl, 1u << (PIO_CTRL_SM_ENABLE_LSB + 0));
+
+    // Push data into TX FIFO, and pop from RX FIFO
+    for (int i = 0; i < 5; ++i)
+        mm_pio->txf[0] = i;
+    for (int i = 0; i < 5; ++i)
+        printf("%d\n", mm_pio->rxf[0]);
+
+    return 0;
+}
+
+```
+
+图44展示了状态机执行该程序的过程。初始时，OSR 为空，所以状态机会在第一条 `OUT` 指令处等待。当 TX FIFO 中有数据时，状态机会将数据传输到 OSR 中。
+在下一个周期，`OUT` 可以利用 OSR 中的数据执行（本例中将数据传输到可擦写寄存器 X 中），同时状态机会使用 FIFO 中的新数据填充 OSR。由于每一条 `IN` 指令都会立即填充 ISR，
+因此 ISR 一直为空，`IN` 就会直接把数据从 X 传输到 RX FIFO。
+
+| ![图44](figures/figure-44.png) |
+|:--:|
+| 图44. `auto_push_pull` 程序的执行过程。状态机会在 `OUT` 上暂停，直到数据从 TX FIFO 进入 OSR。然后，每次执行 OUT 操作，由于其比特数为 32，因此 OSR 都会同时自动加载，而 `IN` 的数据会越过 ISR，直接进入 RX FIFO。当 FIFO 空且 OSR 也为空时状态机会暂停。 |
+
+为了在正确的时间触发自动推出或自动加载，状态机会使用一对 6 比特计数器跟踪 ISR 和 OSR 的总移位数。
+
+- 复位后，或在 `CTRL_SM_RESTART` 时，ISR 移位计数器设置为 0 （尚未移入任何数据），OSR 移位计数器设置为 32 （没有任何待移出数据）
+- `OUT` 指令会给 OSR 移位计数器增加 `Bit count`
+- `IN` 指令会给 ISR 移位计数器增加 `Bit count`
+- `PULL` 指令或自动加载会将 OSR 计数器清为 0
+- `PUSH` 指令或自动推出会将 ISR 计数器清为 0
+- `MOV OSR, x` 或 `MOV ISR, x` 会将 OSR 或 ISR 移位计数器清为 0
+- `OUT ISR, n` 指令会将 ISR 移位计数器设置为 `n`
+
+
+在执行任何 `OUT` 或 `IN` 指令时，状态机都会将移位计数器与 `SHIFTCTRL_PULL_THRESH` 和 `SHIFTCTRL_PUSH_THRESH` 比较，来决定是否要采取动作。自动加载和自动推出分别由 `SHIFTCTRL_AUTOPULL` 和 `SHIFTCTRL_AUTOPUSH` 字段启用。
+
+
+#### 3.5.4.1. 自动推出详解
+
+下面是启用了自动推出（autopush）的 IN 指令的伪代码：
+
+```
+isr = shift_in(isr, input())
+isr count = saturate(isr count + in count)
+
+if rx count >= threshold:
+    if rx fifo is full:
+        stall
+    else:
+        push(isr)
+        isr = 0
+        isr count = 0
+```
+
+注意硬件平台执行上述步骤只需要一个机器时钟周期（除非出现暂停）。
+
+阈值的范围为 1 ~ 32。
+
+
+#### 3.5.4.2. 自动加载详解
+
+在非 OUT 周期，硬件执行以下伪代码：
+
+```
+if MOV or PULL:
+    osr count = 0
+
+if osr count >= threshold:
+    if tx fifo not empty:
+        osr = pull()
+        osr count = 0
+```
+
+因此，自动加载可以在两个 OUT 之间的任何点发生，取决于数据何时到达 FIFO。
+
+在 OUT 周期，步骤略有不同：
+
+```
+if osr count >= threshold:
+    if tx fifo not empty:
+        osr = pull()
+        osr count = 0
+    stall
+else:
+    output(osr)
+    osr = shift(osr, out count)
+    osr count = saturate(osr count + out count)
+
+    if osr count >= threshold:
+        if tx fifo not empty:
+            osr = pull()
+            osr count = 0
+```
+
+
+硬件能够在移出全部数据的同时填充 OSR，因为这两个操作可以并行执行。但是，硬件无法在同一个周期执行填充 OSR 并 'OUT' 同一份数据，因为这样做会造成很长的逻辑链。
+
+可以认为，对于程序而言，填充操作是异步的，但 'OUT' 就像一个数据屏障，状态机永远不能 OUT 尚未写入 FIFO 的数据。
+
+注意，在自动加载启用时，从 OSR 'MOV' 的操作是未定义的；根据与系统 DMA 的竞合状态，你可能会读到尚未移出的残留数据，或读到 FIFO 的新数据。与此类似，'MOV' 到 OSR 的操作可能会覆盖刚刚自动加载进来的数据。
+但是，'MOV' 进 OSR 的数据永远不会被覆盖，因为 'MOV' 会更新移位计数器。
+
+如果你**确实**需要读取 OSR 的内容，应当显式地执行某种 'PULL'。上面描述的不确定性是由硬件自动进行加载的代价。启用自动加载会改变 'PULL' 的行为：如果 OSR 为满，则 PULL 为误操作。
+这样做是为了避免与系统 DMA 之间的竞合冲突。它就像一个屏障：或者自动加载已经开始执行，此时 'PULL' 操作无效；或者程序会在 'PULL' 指令处等待，直到 FIFO 有数据。
+
+'PUSH' 不存在相似的行为，因为自动推出没有这种不确定性。
+
+
+
+### 3.5.5. 时钟分割
+
