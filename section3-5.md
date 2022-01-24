@@ -1,4 +1,4 @@
-## 功能详解
+## 3.5. 功能详解
 
 
 ### 3.5.1. Side-set
@@ -142,4 +142,43 @@ static inline pio_sm_config squarewave_wrap_program_get_default_config(uint offs
 
 
 **注意** `WRAP_BOTTOM` 和 `WRAP_TOP` 是 PIO 指令内存中的绝对地址。如果程序加载到某个偏移量，那么必须相应地调整折返地址。
+
+`squarewave_wrap` 示例中插入了延时周期，所以它的行为与原版 `squarewave` 程序完全相同。但由于使用了程序折返，我们现在可以去掉延时，
+这样输出的速度就是以前的两倍，同时还能维持高电平和低电平的时间相等。
+
+<figure>Pico示例：https://github.com/raspberrypi/pico-examples/tree/master/pio/squarewave/squarewave_fast.pio 行 12 - 18</figure>
+
+```
+12 .program squarewave_fast
+13 ; Like squarewave_wrap, but remove the delay cycles so we can run twice as fast.
+14     set pindirs, 1    ; Set pin to output
+15 .wrap_target
+16     set pins, 1       ; Drive pin high
+17     set pins, 0       ; Drive pin low
+18 .wrap
+```
+
+
+### 3.5.3. FIFO 合并
+
+默认情况下，每个状态机拥有两个 4 字长的 FIFO：一个用于将数据从系统传送到状态机（TX），一个用于反方向（RX）。但是，很多程序并不需要系统和状态机之间的双向数据传输，
+而更长的 FIFO 却很有用，特别是在 DPI 这种高带宽的接口中。在这些情况下，可以通过 `SHIFTCTRL_FJOIN` 选项将两个 4 字长的 FIFO 合并为一个 8 字长的 FIFO。
+
+| ![图42](figures/figure-42.png) |
+|:--:|
+| 图42. 可合并的双 FIFO。每个 FIFO 为 4 字长，包括 4 个数据寄存器、一个 1：4 解码器和一个 4:1 多路复用器。多路复用可以在 TX 和 RX 通道之间进行写数据和读数据操作，这样所有 8 个字都可以从两个端口进行访问。 |
+
+另一个用例是 UART。由于 UART 的 TX/CTS 和 RX/RTS 部分是异步的，因此它们是在两个独立的状态机上实现的。而让每个状态机的一半 FIFO 资源空闲，是一种浪费。
+由于我们可以将两个 FIFO 合并成一个 TX FIFO 供 TX/CTS 状态机使用，或者合并成一个 RX FIFO 供 RX/RTS 状态机使用，这样就能利用全部资源。
+而拥有 8 字深 FIFO 的 UART 能够处理的中断数量是 4 字深 FIFO 的 UART 的两倍。
+
+增加 FIFO 的深度（从 4 增加到 8）后，同一个状态机中的另一个 FIFO 的大小就变为零。例如，如果将 FIFO 合并供 TX 使用，那么就无法使用 RX FIFO，任何 `PUSH` 指令都会陷入等待状态。
+在 `FSTAT` 寄存器中，RX FIFO 同时表现为 `RXFULL` 和 `RXEMPTY` 状态。而合并到 RX 的情况正相反：TX FIFO 不可用，该状态机的 `FSTAT` 中 `TXFULL` 和 `TXEMPTY` 比特均为设置状态。
+
+只要 DMA 没有因为其他竞合状态而变慢，那么 8 字 FIFO 足够通过 RP2040 的 DMA 实现每个周期 1 字的速率。
+
+**注意** 改变 `FJOIN` 会抛弃当前状态机的 FIFO 中的一切数据。如果数据不能恢复，那么必须事先清空 FIFO 队列。
+
+
+### 3.5.4. 自动推出和自动加载
 
