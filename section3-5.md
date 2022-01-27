@@ -418,7 +418,7 @@ PIO 依靠系统时钟运行，但对于绝大多数接口来说，系统时钟�
 分数分割比例会维持稳定的 *n + f / 256* 的分割速率，其中 *n* 和 *f* 是该状态机的 `CLKDIV` 寄存器的整数和分数部分。
 它会有选择地在 `n` 个周期到 `n+1` 个周期之间延长某个分割期间。
 
-| ![图47](fifugres/figure-47.png) |
+| ![图47](figures/figure-47.png) |
 |:--:|
 | 图47. 分数时钟分割比例，平均分割比例为 2.5。时钟分割器会在每个分割周期上改变分数部分的值，当到达 1 时，则给整数部分加 1，以延长下一个分割周期。 |
 
@@ -427,4 +427,148 @@ PIO 依靠系统时钟运行，但对于绝大多数接口来说，系统时钟�
 **注意** 对于高速异步串口来说，最好使用偶数分割比例，或 1M 波特的整数倍，而不要使用传统的 300 的倍数，以避免不必要的抖动。
 
 ### 3.5.6. GPIO 映射
+
+在内部，PIO 有一个 32 位寄存器，表示它能驱动的每个 GPIO 管脚的输出电平，以及另一个寄存器表示每个输出允许的情况（高低阻抗）。在每个系统时钟周期，每个状态机都可以写入这些寄存器中的部分或全部 GPIO。
+
+| ![图48](figures/figure-48.png) |
+|:--:|
+| 图48. 状态机有两个独立的输出通道，一个由 OUT/SET 共享，另一个由 side-set 使用（可在任何时刻发生）。三个独立的映射（每个映射包括第一个 GPIO 管脚号和 GPIO 个数）控制 OUT、SET 和 side-set 被定向到哪个 GPIO。输入数据会根据哪个 GPIO 被映射到 IN 数据的 LSB 进行旋转。|
+
+输出电平和输出允许寄存器的写数据和写掩码来自以下来源：
+
+- 一条 `OUT` 指令，最多能写 32 比特。根据指令的 `Destination` 字段，该指令可以应用于管脚或管脚方向。`OUT` 数据的最低位映射到 `PINCTRL_OUT_BASE`，向后依次映射 `PINCTRL_OUT_COUNT` 个比特，在到达 GPIO31 后折返。
+- 一条 `SET` 指令，最多能写 5 比特。根据指令的 `Destination` 字段，该指令可以应用于管脚或管教方向。`SET` 数据的最低位映射到 `PINCTRL_SET_BASE`，向后依次映射 `PINCTRL_SET_COUNT` 个比特，在到达 GPIO31 后折返。
+- 一个 side-set 操作，最多能写 5 比特。根据 `EXECCTRL_SIDE_PINDIR` 寄存器字段的值，该操作可以应用于管脚或管教方向。side-set 数据的最低位映射到 `PINCTRL_SIDESET_BASE`，向后依次映射 `PINCTRL_SIDESET_COUNT` 个比特，在到达 GPIO31 后折返。
+
+每个 `OUT`/`SET`/side-set 操作都会写连续的管脚区间，但每个区间都在 32 比特的 GPIO 空间内有独立的大小和位置。对于大多数应用来说，这已经足够灵活了。例如，如果一个状态机在一组管脚上实现了像 SPI 等接口，那么另一个状态机可以运行同一个程序，映射到另一组管脚上，提供第二个 SPI 接口。
+
+在任意时钟周期，状态机可以执行一次 `OUT` 或 `SET`，并且可以同时执行一次 side-set。管脚映射逻辑会生成一个 32 比特的写掩码，并根据情趣内容和管脚映射配置，将输出电平和输出允许寄存器写入数据总线。
+
+如果同一个状态机在同一个时钟周期内的 side-set 操作与 `OUT`/`SET` 操作重叠，那么在重叠的区域中 side-set 优先。
+
+
+#### 3.5.6.1. 输出优先级
+
+| ![图49](figures/figure-49.png) |
+|:--:|
+| 图49. 每个状态机对于每个 GPIO 通过写掩码选择优先级。每个 GPIO 会考虑来自四个状态机的写入电平和方向，然后应用编号最大的状态机的值。 |
+
+每个状态机在每个周期会通过其管脚映射硬件执行一次 `OUT`/`SET` 和 side-set。这样，每个状态机都会为 GPIO 输出电平和输出允许寄存器生成 32 比特的写数据和写掩码。
+
+对于每个 GPIO，PIO 会考虑来自所有四个状态机的写操作，然后应用编号最大的状态机的写操作。这一步骤是针对输出电平和输出值分别进行的，所以可能出现在同一个周期内一个状态机同时改变了同一个管脚的电平和方向（例如通过同时发出的 `SET` 和 side-set），或一个状态机改变了 GPIO 方向，另一个状态机改变了同一个 GPIO 的电平。如果没有状态机写入 GPIO 的电平或方向，则值保持不变。
+
+
+#### 3.5.6.2. 输入映射
+
+`IN` 指令收到的数据的方式是，LSB 映射到 `PINCTRL_IN_BASE` 设置的 GPIO，后续的更高位来自后续更高编号的 GPIO，到达 31 时折返。
+
+换句话说，`IN` 总线是 GPIO 输入值根据 `PINCTRL_IN_BASE` 的右旋结果。如果不够 32 个 GPIO，则 PIO 输入会在相应位置上填充 0， 以补齐 32 比特。
+
+像 `WAIT GPIO` 等指令会使用绝对 GPIO 编号，而不是 `IN` 数据总线中的索引。此时不会进行右旋。
+
+
+#### 3.5.6.3. 输入同步器
+
+为了保证 PIO 的稳定性，每个 GPIO 输入都有两个标准 2-fliplop 同步器。这会导致输入采样延迟两个周期，但好处是，状态机可以在任何时刻执行 `IN PINS`，而且只会看到干净的高低电平，而不会看到可能会影响状态机电路的中间值。
+对于 UART RX 等异步接口来说这一点非常重要。
+
+有时某些 GPIO 可能需要跳过同步器。这样可以减少延迟，但用户必须自行保证状态机不会在错误的时刻进行采样。通常，只有 SPI 等同步接口才能做到这一点。设置 `INPUT_SYNC_BYPASS` 中的相应比特即可跳过同步器。
+
+**警告** 对不稳定的输入进行采样会导致不可预测的状态机行为，应当避免这种情况。
+
+
+
+### 3.5.7. 强制指令和被 EXEC 的指令
+
+除了指令内存外，状态机还可以从其他三个来源执行指令：
+
+- `MOV EXEC` 可以从 `Source` 指定的某个寄存器执行指令
+- `OUT EXEC` 可以执行 OSR 移出的数据
+- 从 `SMx_INSTR` 控制寄存器执行指令，系统可以将指令直接写入该寄存器，以立即执行
+
+
+```
+ 1 .program exec_example
+ 2 
+ 3 hang:
+ 4     jmp hang
+ 5 execute:
+ 6     out exec, 32
+ 7     jmp execute
+ 8 
+ 9 .program instructions_to_push
+10 
+11     out x, 32
+12     in x, 32
+13     push
+```
+
+```c
+#include "tb.h" // TODO this is built against existing sw tree, so that we get printf etc
+
+#include "platform.h"
+#include "pio_regs.h"
+#include "system.h"
+#include "hardware.h"
+
+#include "exec_example.pio.h"
+
+int main()
+{
+    tb_init();
+
+    for (int i = 0; i < count_of(exec_example_program); ++i)
+        mm_pio->instr_mem[i] = exec_example_program[i];
+
+    // Enable autopull, threshold of 32
+    mm_pio->sm[0].shiftctrl = (1u << PIO_SM0_SHIFTCTRL_AUTOPULL_LSB);
+
+    // Start state machine 0 -- will sit in "hang" loop
+    hw_set_bits(&mm_pio->ctrl, 1u << (PIO_CTRL_SM_ENABLE_LSB + 0));
+
+    // Force a jump to program location 1
+    mm_pio->sm[0].instr = 0x0000 | 0x1; // jmp execute
+
+    // Feed a mixture of instructions and data into FIFO
+    mm_pio->txf[0] = instructions_to_push_program[0]; // out x, 32
+    mm_pio->txf[0] = 12345678;                        // data to be OUTed
+    mm_pio->txf[0] = instructions_to_push_program[1]; // in x, 32
+    mm_pio->txf[0] = instructions_to_push_program[2]; // push
+
+    // The program pushed into TX FIFO will return some data in RX FIFO
+    while (mm_pio->fstat & (1u << PIO_FSTAT_RXEMPTY_LSB))
+        ;
+
+    printf("%d\n", mm_pio->rxf[0]);
+
+    return 0;
+}
+```
+
+这里我们向状态机中加载了一个示例程序，它做了两件事：
+
+- 进入无限循环
+- 进入一个循环，该循环反复地从 TX FIFO 加载 32 比特数据u，然后将低 16 比特作为指令执行
+
+C 程序将状态机设置为运行状态，然后进入 `hang` 循环。在状态机执行时，C 程序强制执行一条 `jmp` 指令，使状态机跳出循环。
+
+当一条指令写入 `INSTR` 寄存器后，状态机会立即解码并执行该指令，而不会执行从 PIO 指令内存读取到的指令。
+程序计数器不会增加，因此在下一个周期（假设 `INSTR` 寄存器强制执行的指令没有导致等待状态）状态机会从原来的位置继续执行当前程序，
+除非写入的指令修改了 `PC`。
+
+写入 `INSTR` 寄存器的指令中的延时周期会被忽略，并立即执行，不管状态机的时钟分割器如何设置。这个接口用于执行初始化或改变流程控制，
+所以指令会尽快执行，而不管状态机如何配置。
+
+写入 `INSTR` 的指令可以进入等待状态，此时状态机会锁住该指令，直到其完成。出现这种情况时，会设置 `EXECCTRL_EXEC_STALLED` 标志。
+重启状态机或向 `INSTR` 写入 `NOP` 可以清除该标志。
+
+上述示例状态机程序的第二阶段使用了 `OUT EXEC` 指令。`OUT` 本身需要一个执行周期，`OUT` 执行的指令在下一个执行周期进行。注意被执行的指令之一也是 `OUT`——
+状态机每个周期只能执行一条 `OUT` 指令。
+
+`OUT EXEC` 会将 `OUT` 移出的数据写入内部的指令锁存器。下一个周期中，状态机知道它不应该执行指令内存，而是执行该锁存器的内容，而且知道此时不应当增加 `PC`。
+
+该程序在运行时会输出 "12345678"。
+
+**注意** 如果写入 `INSTR` 的指令造成等待状态，该指令会被写入到与 `OUT EXEC` 和 `MOV EXEC` 所用的同一个锁存器，并覆盖其中保存的指令。
+因此，如果使用了 `EXEC` 指令，那么写入 `INSTR` 的指令不能造成等待。
 
